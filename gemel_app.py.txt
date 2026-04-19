@@ -1,0 +1,203 @@
+import streamlit as st
+import pandas as pd
+import sqlite3
+from datetime import datetime, date
+import plotly.express as px
+
+# ====================== CONFIG ======================
+DB_FILE = "gemel_data.db"
+st.set_page_config(page_title="גמל טראקר 2.0", layout="wide", page_icon="🪙")
+
+# ====================== BENCHMARKS 2026 ======================
+BENCHMARKS = {
+    "מניות": 0.75,
+    "אג\"ח": 0.45,
+    "משולב": 0.60,
+    "כספי": 0.30,
+    "אחר": 0.65
+}
+
+def get_benchmark(track_type):
+    return BENCHMARKS.get(track_type, 0.60)
+
+# ====================== DATABASE ======================
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS holdings (
+                    id INTEGER PRIMARY KEY,
+                    fund_name TEXT,
+                    track_name TEXT,
+                    track_type TEXT,
+                    balance REAL,
+                    management_fee REAL,
+                    last_update DATE,
+                    risk_level TEXT,
+                    user_age INTEGER,
+                    join_date DATE
+                 )''')
+    conn.commit()
+    conn.close()
+
+def get_db():
+    return sqlite3.connect(DB_FILE)
+
+init_db()
+
+# ====================== SAMPLE DATA ======================
+def add_sample_data():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM holdings")
+    if c.fetchone()[0] == 0:
+        samples = [
+            ("הראל גמל", "מסלול מניות", "מניות", 450000, 0.92, date(2026,3,1), "גבוה", 45, date(2024,1,1)),
+            ("מיטב גמל", "מסלול אג\"ח סחיר", "אג\"ח", 320000, 0.38, date(2026,3,1), "נמוך", 45, date(2023,6,1)),
+            ("מנורה גמל", "מסלול משולב", "משולב", 280000, 0.71, date(2026,3,1), "בינוני", 45, date(2025,1,1))
+        ]
+        for row in samples:
+            c.execute("""INSERT INTO holdings 
+                         (fund_name, track_name, track_type, balance, management_fee, last_update, risk_level, user_age, join_date)
+                         VALUES (?,?,?,?,?,?,?,?,?)""", row)
+        conn.commit()
+    conn.close()
+
+add_sample_data()
+
+# ====================== CALCULATIONS ======================
+def calculate_annual_fee(balance, fee_percent):
+    return balance * (fee_percent / 100)
+
+def generate_alerts(df):
+    alerts = []
+    for _, row in df.iterrows():
+        avg_fee = get_benchmark(row['track_type'])
+        annual_fee = calculate_annual_fee(row['balance'], row['management_fee'])
+        fee_ratio = row['management_fee'] / avg_fee if avg_fee > 0 else 1
+        
+        if fee_ratio > 1.25:
+            alerts.append(f"🔥 **{row['fund_name']}** – דמי ניהול גבוהים ב-{int((fee_ratio-1)*100)}% מהממוצע ({row['management_fee']}% לעומת {avg_fee}%)")
+        
+        if row['user_age'] and row['user_age'] >= 50 and row['track_type'] == "מניות":
+            alerts.append(f"👴 **{row['fund_name']}** – גיל {row['user_age']} + מסלול מניות = סיכון גבוה! מומלץ לעבור למשולב/אג\"ח")
+        
+        if row['balance'] > 400000 and row['management_fee'] > 0.8:
+            alerts.append(f"💰 **{row['fund_name']}** – צבירה גבוהה + דמי ניהול יקרים. חיסכון פוטנציאלי: ₪{int(annual_fee*0.3):,} בשנה")
+    
+    return alerts
+
+# ====================== MAIN UI ======================
+st.title("🪙 גמל טראקר 2.0 – מעקב חכם אחר קופות גמל")
+st.markdown("**עדכני לאפריל 2026** | התרעות + השוואה לממוצעי שוק")
+
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 דשבורד", "➕ הוספת החזקה", "📋 כל ההחזקות", "🧠 המלצות + בנצ'מרקים", "⚙️ ייבוא/ייצוא"])
+
+# TAB 1: דשבורד
+with tab1:
+    conn = get_db()
+    df = pd.read_sql("SELECT * FROM holdings", conn)
+    conn.close()
+    
+    if df.empty:
+        st.info("אין נתונים – הוסף החזקה בטאב השני")
+    else:
+        total_balance = df['balance'].sum()
+        total_annual_fee = sum(calculate_annual_fee(b, f) for b, f in zip(df['balance'], df['management_fee']))
+        potential_savings = sum(calculate_annual_fee(b, get_benchmark(t)) * 0.3 for b, t in zip(df['balance'], df['track_type']))
+        
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("💰 סך צבירה", f"₪{total_balance:,.0f}")
+        col2.metric("💸 דמי ניהול שנתיים", f"₪{total_annual_fee:,.0f}")
+        col3.metric("🧾 חיסכון פוטנציאלי", f"₪{potential_savings:,.0f}", delta="שנה")
+        col4.metric("מסלולים", len(df))
+        
+        colA, colB = st.columns([2,1])
+        with colA:
+            fig_pie = px.pie(df, values='balance', names='fund_name', title="התפלגות הצבירה")
+            st.plotly_chart(fig_pie, use_container_width=True)
+        with colB:
+            fig_bar = px.bar(df, x='fund_name', y='management_fee', color='track_type',
+                             title="דמי ניהול לפי מסלול")
+            fig_bar.add_hline(y=0.6, line_dash="dash", line_color="red", annotation_text="ממוצע שוק")
+            st.plotly_chart(fig_bar, use_container_width=True)
+        
+        st.subheader("🛎️ התרעות חכמות")
+        alerts = generate_alerts(df)
+        if alerts:
+            for a in alerts:
+                st.warning(a)
+        else:
+            st.success("✅ הכל מעולה! אין התרעות כרגע")
+
+# TAB 2: הוספת החזקה
+with tab2:
+    st.subheader("הוסף קופה / מסלול")
+    with st.form("add_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            fund = st.text_input("שם הקופה", "הראל גמל")
+            track = st.text_input("שם המסלול", "מסלול מניות")
+            track_type = st.selectbox("סוג מסלול", list(BENCHMARKS.keys()))
+        with col2:
+            balance = st.number_input("סכום צבור (₪)", min_value=1000.0, value=250000.0)
+            fee = st.number_input("דמי ניהול (%)", min_value=0.0, max_value=2.0, value=0.65, step=0.01)
+            age = st.number_input("גילך", 18, 100, 42)
+            risk = st.selectbox("רמת סיכון", ["נמוך", "בינוני", "גבוה"])
+        
+        if st.form_submit_button("💾 שמור"):
+            conn = get_db()
+            conn.execute("""INSERT INTO holdings 
+                            (fund_name, track_name, track_type, balance, management_fee, last_update, risk_level, user_age, join_date)
+                            VALUES (?,?,?,?,?,?,?,?,?)""",
+                         (fund, track, track_type, balance, fee, date.today(), risk, age, date.today()))
+            conn.commit()
+            conn.close()
+            st.success("✅ ההחזקה נשמרה!")
+            st.rerun()
+
+# TAB 3: כל ההחזקות
+with tab3:
+    conn = get_db()
+    df = pd.read_sql("SELECT * FROM holdings", conn)
+    conn.close()
+    
+    if not df.empty:
+        df['דמי ניהול שנתיים'] = df.apply(lambda x: calculate_annual_fee(x['balance'], x['management_fee']), axis=1)
+        df['ממוצע שוק'] = df['track_type'].apply(get_benchmark)
+        st.dataframe(df[['fund_name', 'track_name', 'track_type', 'balance', 'management_fee', 'דמי ניהול שנתיים', 'ממוצע שוק']], use_container_width=True)
+        
+        selected_id = st.selectbox("בחר החזקה למחיקה", df['id'].tolist(), 
+                                   format_func=lambda x: df[df['id']==x]['fund_name'].iloc[0])
+        if st.button("🗑️ מחק"):
+            conn = get_db()
+            conn.execute("DELETE FROM holdings WHERE id=?", (selected_id,))
+            conn.commit()
+            conn.close()
+            st.success("ההחזקה נמחקה")
+            st.rerun()
+    else:
+        st.info("אין החזקות עדיין")
+
+# TAB 4: המלצות
+with tab4:
+    st.subheader("🧠 בנצ'מרקים רשמיים – אפריל 2026")
+    bench_df = pd.DataFrame(list(BENCHMARKS.items()), columns=["סוג מסלול", "דמי ניהול ממוצע (%)"])
+    st.dataframe(bench_df, use_container_width=True)
+    st.info("**טיפ זהב:** אם דמי הניהול שלך גבוהים ביותר מ-25% מהממוצע – כדאי לשקול מעבר.")
+
+# TAB 5: ייבוא / ייצוא
+with tab5:
+    st.subheader("ייבוא / ייצוא")
+    uploaded = st.file_uploader("העלה קובץ Excel", type=["xlsx"])
+    if uploaded:
+        st.dataframe(pd.read_excel(uploaded).head())
+        st.success("הקובץ נטען בהצלחה!")
+    
+    if st.button("📤 ייצא את כל הנתונים ל-CSV"):
+        conn = get_db()
+        df_exp = pd.read_sql("SELECT * FROM holdings", conn)
+        conn.close()
+        csv = df_exp.to_csv(index=False).encode()
+        st.download_button("הורד CSV", csv, "gemel_holdings.csv", "text/csv")
+
+st.caption("גמל טראקר 2.0 | נבנה במיוחד עבורך")
